@@ -28,6 +28,7 @@ import subprocess
 import numpy as np
 import speech_recognition as sr
 import sounddevice as sd
+import whisper as _whisper
 from datetime import datetime
 
 try:
@@ -83,6 +84,11 @@ MIN_SPEECH_CHUNKS = 8
 # ──────────────────────────────────────────────────────
 
 conv_history: list = []   # Claude 다중 턴 대화 히스토리
+
+# Whisper 모델 로드 (base: 속도/정확도 균형, small: 한국어 정확도 향상)
+print("[Jarvis] Whisper 모델 로딩 중...")
+_whisper_model = _whisper.load_model("small")
+print("[Jarvis] Whisper 준비 완료")
 
 state = {
     "lock":        threading.Lock(),
@@ -447,8 +453,22 @@ def speak_async(text: str):
 
 # ── 음성 인식 + 웨이크워드 ──────────────────────────────
 
+def _transcribe(audio_np: np.ndarray) -> str:
+    """Whisper 로컬 STT — Google FLAC 불필요, M3 네이티브"""
+    audio_f32 = audio_np.astype(np.float32) / 32768.0
+    result    = _whisper_model.transcribe(
+        audio_f32,
+        language="ko",
+        fp16=False,
+        condition_on_previous_text=False,
+    )
+    text = result.get("text", "").strip()
+    if not text:
+        raise sr.UnknownValueError()
+    return text
+
+
 def voice_listener(stop_event):
-    recognizer  = sr.Recognizer()
     audio_queue: queue.Queue = queue.Queue()
 
     def callback(indata, frames, time_info, status):
@@ -490,11 +510,10 @@ def voice_listener(stop_event):
             with state["lock"]:
                 state["listening"] = True
 
-            audio_np   = np.concatenate(speech_chunks).flatten()
-            audio_data = sr.AudioData(audio_np.tobytes(), SAMPLE_RATE, 2)
+            audio_np = np.concatenate(speech_chunks).flatten()
 
             try:
-                text = recognizer.recognize_google(audio_data, language="ko-KR")
+                text = _transcribe(audio_np)
             except sr.UnknownValueError:
                 with state["lock"]:
                     state["listening"] = False
